@@ -79,17 +79,17 @@ export const DocumentUpload = ({ data, onUpdate, onNext, onBack }: DocumentUploa
         return;
       }
 
-      // Perform OCR with progress tracking
-      const result = await Tesseract.recognize(file, 'eng', {
+      // Perform OCR with progress tracking (multi-language for Aadhaar)
+      const result = await Tesseract.recognize(file, 'eng+hin', {
         logger: (m) => {
           if (m.status === 'recognizing text') {
             setDocumentValidation(prev => ({
               ...prev,
-              progress: Math.round(m.progress * 100)
+              progress: Math.round(((m as any).progress || 0) * 100)
             }));
           }
         }
-      });
+      } as any);
 
       const rawText = result?.data?.text || '';
       console.log('OCR Text:', rawText); // For debugging
@@ -124,7 +124,7 @@ export const DocumentUpload = ({ data, onUpdate, onNext, onBack }: DocumentUploa
       const validationResults: ValidationResult['validationResults'] = {};
 
       // Name validation
-      const nameResult = findNameInText(data.name, rawText);
+      const nameResult = findNameInText(data.name, rawText, 0.6);
       validationResults.name = {
         found: nameResult.found,
         confidence: nameResult.confidence,

@@ -123,41 +123,142 @@ export const findDateInText = (dateInput: string, documentText: string): {
   confidence: number;
   extractedDate?: string;
 } => {
-  const inputDigits = extractDigits(dateInput);
-  
-  // Common date patterns in Indian documents
-  const datePatterns = [
-    /\b\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\b/g, // DD/MM/YYYY or DD-MM-YYYY
-    /\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{2,4}\b/gi, // DD Month YYYY
-    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*\s+\d{1,2},?\s+\d{2,4}\b/gi, // Month DD, YYYY
-    /(?:dob|date\s*of\s*birth|birth\s*date)[\s:]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/gi,
-    /year\s*of\s*birth[\s:]*(\d{4})/gi, // Year of birth
+  // Normalize input date into components regardless of format (YYYY-MM-DD, DD/MM/YYYY, etc.)
+  const parseInput = (input: string) => {
+    const digits = extractDigits(input);
+    // Try YYYYMMDD
+    if (/^\d{8}$/.test(digits)) {
+      // Heuristic: if original contains '-' and starts with 19/20 treat as YYYYMMDD
+      const yearFirst = /^\d{4}/.test(digits);
+      if (yearFirst) {
+        return { d: parseInt(digits.slice(6, 8)), m: parseInt(digits.slice(4, 6)), y: parseInt(digits.slice(0, 4)) };
+      }
+    }
+    // Try to detect standard input from <input type="date"> which is YYYY-MM-DD
+    const ymd = input.match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);
+    if (ymd) {
+      return { d: parseInt(ymd[3]), m: parseInt(ymd[2]), y: parseInt(ymd[1]) };
+    }
+    // Fallback: try DD/MM/YYYY
+    const dmy = input.match(/(\d{1,2})[\/-\.](\d{1,2})[\/-\.](\d{2,4})/);
+    if (dmy) {
+      const y = parseInt(dmy[3].length === 2 ? `20${dmy[3]}` : dmy[3]);
+      return { d: parseInt(dmy[1]), m: parseInt(dmy[2]), y };
+    }
+    // If only year is present
+    const yOnly = input.match(/\b(19|20)\d{2}\b/);
+    if (yOnly) {
+      return { d: NaN, m: NaN, y: parseInt(yOnly[0]) };
+    }
+    return { d: NaN, m: NaN, y: NaN };
+  };
+
+  const monthMap: Record<string, number> = {
+    jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+    jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12,
+  };
+
+  const parseMatch = (text: string) => {
+    const lower = text.toLowerCase();
+
+    // Month name formats
+    let m = lower.match(/\b(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+(\d{2,4})\b/i);
+    if (m) {
+      const month = monthMap[m[2].slice(0, 3)];
+      const year = parseInt(m[3].length === 2 ? `20${m[3]}` : m[3]);
+      return { d: parseInt(m[1]), m: month, y: year };
+    }
+    m = lower.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+(\d{1,2}),?\s+(\d{2,4})\b/i);
+    if (m) {
+      const month = monthMap[m[1].slice(0, 3)];
+      const year = parseInt(m[3].length === 2 ? `20${m[3]}` : m[3]);
+      return { d: parseInt(m[2]), m: month, y: year };
+    }
+
+    // Numeric formats
+    m = lower.match(/\b(\d{1,2})[\/-\.](\d{1,2})[\/-\.](\d{2,4})\b/);
+    if (m) {
+      const day = parseInt(m[1]);
+      const month = parseInt(m[2]);
+      const year = parseInt(m[3].length === 2 ? `20${m[3]}` : m[3]);
+      return { d: day, m: month, y: year };
+    }
+    m = lower.match(/\b(\d{4})[\/-\.](\d{1,2})[\/-\.](\d{1,2})\b/);
+    if (m) {
+      return { d: parseInt(m[3]), m: parseInt(m[2]), y: parseInt(m[1]) };
+    }
+
+    // Year of birth only
+    m = lower.match(/(?:dob|date\s*of\s*birth|birth\s*date)[\s:]*((\d{1,2})[\/-\.](\d{1,2})[\/-\.](\d{2,4}))/i);
+    if (m) {
+      const d = parseInt(m[2]);
+      const mo = parseInt(m[3]);
+      const y = parseInt(m[4].length === 2 ? `20${m[4]}` : m[4]);
+      return { d, m: mo, y };
+    }
+    m = lower.match(/year\s*of\s*birth[\s:]*(\d{4})/i);
+    if (m) {
+      return { d: NaN, m: NaN, y: parseInt(m[1]) };
+    }
+
+    // Fallback: extract digits and try to infer
+    const digits = extractDigits(lower);
+    if (digits.length === 8) {
+      const asYmd = { d: parseInt(digits.slice(6, 8)), m: parseInt(digits.slice(4, 6)), y: parseInt(digits.slice(0, 4)) };
+      const asDmy = { d: parseInt(digits.slice(0, 2)), m: parseInt(digits.slice(2, 4)), y: parseInt(digits.slice(4, 8)) };
+      return Number.isNaN(asYmd.y) ? asDmy : asYmd;
+    }
+    if (digits.length === 4) {
+      return { d: NaN, m: NaN, y: parseInt(digits) };
+    }
+    return { d: NaN, m: NaN, y: NaN };
+  };
+
+  const input = parseInput(dateInput);
+
+  // Scan document for date-like strings and compare by components
+  const patterns = [
+    /\b\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\b/g,
+    /\b\d{4}[\/\-\.]\d{1,2}[\/\-\.]\d{1,2}\b/g,
+    /\b\d{1,2}\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d{2,4}\b/gi,
+    /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d{1,2},?\s+\d{2,4}\b/gi,
+    /(?:dob|date\s*of\s*birth|birth\s*date)[\s:]*(\d{1,2}[\/-\.]\d{1,2}[\/-\.]\d{2,4})/gi,
+    /year\s*of\s*birth[\s:]*(\d{4})/gi,
   ];
-  
-  for (const pattern of datePatterns) {
+
+  for (const pattern of patterns) {
     const matches = [...documentText.matchAll(pattern)];
     for (const match of matches) {
       const dateText = match[1] || match[0];
-      const matchDigits = extractDigits(dateText);
-      
-      // Direct match
-      if (matchDigits === inputDigits) {
-        return { found: true, confidence: 1.0, extractedDate: dateText };
+      const m = parseMatch(dateText);
+
+      // If only year matched
+      if (!Number.isNaN(input.y) && Number.isNaN(m.d) && Number.isNaN(m.m) && m.y === input.y) {
+        return { found: true, confidence: 0.85, extractedDate: dateText };
       }
-      
-      // For year-only matches, check if year matches
-      if (matchDigits.length === 4 && inputDigits.includes(matchDigits)) {
-        return { found: true, confidence: 0.8, extractedDate: dateText };
+
+      // Compare components allowing different orders
+      let score = 0;
+      if (!Number.isNaN(input.d) && !Number.isNaN(m.d) && input.d === m.d) score += 0.34;
+      if (!Number.isNaN(input.m) && !Number.isNaN(m.m) && input.m === m.m) score += 0.33;
+      if (!Number.isNaN(input.y) && !Number.isNaN(m.y) && input.y === m.y) score += 0.33;
+
+      if (score >= 0.66) {
+        return { found: true, confidence: Math.min(1, score + 0.2), extractedDate: dateText };
       }
-      
-      // Partial date match (at least day and month or year)
-      const similarity = getSimilarity(inputDigits, matchDigits);
+      if (score >= 0.34) {
+        // Partial match
+        return { found: true, confidence: score, extractedDate: dateText };
+      }
+
+      // Fallback similarity on digits
+      const similarity = getSimilarity(extractDigits(dateInput), extractDigits(dateText));
       if (similarity >= 0.6) {
         return { found: true, confidence: similarity, extractedDate: dateText };
       }
     }
   }
-  
+
   return { found: false, confidence: 0 };
 };
 
